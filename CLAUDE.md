@@ -95,3 +95,8 @@ Grouped by what gets filled in next:
 
 - Keep `backend/app/models.py`, `backend/app/schemas.py`, and `frontend/src/types.ts` in sync — they describe the same shapes across three layers.
 - Subreddits table is capped at 5 rows by design (enforced at the API layer, not the DB).
+
+## Tooling
+
+- Use the LSP tool (goToDefinition, findReferences, hover, documentSymbol, etc.) when navigating or editing code in this repo, rather than relying on text search alone — especially for cross-file checks like keeping `models.py`/`schemas.py`/`types.ts` in sync, or tracing scraper/router call sites.
+- The Python LSP (Pyright) needs `backend/.venv` set up with `pip install -r requirements.txt` to resolve imports; without it, import diagnostics will show as false positives.
