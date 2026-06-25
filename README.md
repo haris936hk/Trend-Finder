@@ -13,7 +13,16 @@ in place; the real scoring/scraping logic is not implemented yet.
 
 ## Running locally
 
-Two separate processes, no Docker required.
+Two separate processes, no Docker required. Once both are set up individually
+(venv + `pip install`, `npm install`) at least once, you can launch both at
+the same time from the project root with:
+
+```powershell
+.\start.ps1
+```
+
+This opens two PowerShell windows — one running `uvicorn`, one running
+`npm run dev`. Close those windows (or Ctrl+C inside them) to stop the servers.
 
 ### Backend
 
@@ -32,20 +41,20 @@ curl http://127.0.0.1:8000/health
 # {"status":"ok"}
 ```
 
-A `backend/trend_finder.db` SQLite file is created automatically on startup
-(tables only — no data). To populate the starting keyword/subreddit list, run
-the seed script manually once:
-
-```bash
-python seed.py
-```
+A `backend/trend_finder.db` SQLite file is created automatically on startup.
+If the `keywords`/`subreddits` tables are empty (e.g. on first run), they're
+auto-seeded with a default list of home-office keywords and subreddits — see
+`backend/app/seed_data.py`. Defaults are only inserted when a table is empty,
+so your own edits are never overwritten on later restarts. To force-reseed
+the defaults (e.g. after clearing your data), run `python seed.py` manually.
 
 #### Reddit credentials
 
 Copy `backend/.env.example` to `backend/.env` and fill in your Reddit app
 credentials (`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT`).
-Required once the Reddit scraper logic is implemented — the app boots fine
-without them, but `get_reddit_mentions()` will raise an error if they're missing.
+Reddit credentials are optional: if they're missing, or the Reddit API fails
+mid-scan, `POST /scan` falls back to scoring on Google Trends data alone
+instead of failing the run.
 
 ### Frontend
 
@@ -73,15 +82,17 @@ Grouped by what you'll fill in next:
 **Scan/scoring logic**
 - `backend/app/routers/scan.py` — `POST /scan` pipeline (create run, loop
   keywords × subreddits, call scrapers, normalize, compute composite score,
-  persist results, abort-on-failure) and `GET /results` (query latest run +
-  history)
+  persist results, abort on a Trends failure) and `GET /results` (query
+  latest run + history). Reddit is optional: missing credentials or a failed
+  Reddit call fall back to Trends-only scoring instead of aborting the run.
 
 **Scraper internals**
 - `backend/scrapers/trends_scraper.py` — `get_trend_score()`: real pytrends
   call + recent-3mo-vs-prior-9mo slope calculation
-- `backend/scrapers/reddit_scraper.py` — `get_reddit_mentions()`: real PRAW
-  search across subreddits + fuzzy matching against keyword/synonyms
-  (credential loading is already implemented)
+- `backend/scrapers/reddit_scraper.py` — `get_mention_score()`: real PRAW
+  search across subreddits + fuzzy matching against keyword/synonyms;
+  `reddit_available()` lets callers check credentials upfront without
+  raising.
 
 **Settings CRUD**
 - `backend/app/routers/keywords.py` — real DB-backed create/read/update/delete

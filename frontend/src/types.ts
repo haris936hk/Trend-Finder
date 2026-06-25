@@ -11,6 +11,10 @@ export interface Subreddit {
   name: string;
 }
 
+export interface Settings {
+  lookback_months: number;
+}
+
 export interface RankedScore {
   keyword_id: number;
   keyword_name: string;
@@ -37,9 +41,15 @@ export interface ResultsResponse {
   history: Record<string, HistoryEntry[]>;
 }
 
-export interface ScanFailure {
-  error: "scan_failed";
+export interface ScanProgressEvent {
+  type: "keyword_start" | "keyword_done" | "error" | "complete";
+  keyword_name?: string;
+  index?: number;
+  total?: number;
+  trend_score?: number;
+  mention_score?: number;
+  detail?: string;
   keyword?: string;
   source?: "trends" | "reddit" | "db";
-  detail: string;
+  results?: ResultsResponse;
 }

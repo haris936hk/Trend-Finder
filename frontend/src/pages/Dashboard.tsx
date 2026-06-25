@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import { Link } from "react-router-dom";
 import { api, ApiError } from "../api";
-import type { Keyword, Subreddit, ResultsResponse, ScanFailure } from "../types";
+import type { Keyword, Subreddit, ResultsResponse, ScanProgressEvent } from "../types";
 
 interface Product {
   id: number;
@@ -18,6 +18,20 @@ interface Product {
 
 const HOT = 75;
 const PANEL_W = 480;
+const SCAN_MODAL_W = 440;
+
+type KeywordScanStatus = "pending" | "scanning" | "done" | "failed";
+
+interface KeywordScanStep {
+  status: KeywordScanStatus;
+  trendScore?: number;
+  mentionScore?: number;
+}
+
+function formatScanFailure(event: ScanProgressEvent): string {
+  const where = event.source ? ` (source: ${event.source}${event.keyword ? `, keyword: "${event.keyword}"` : ""})` : "";
+  return `${event.detail ?? "Scan failed."}${where}`;
+}
 
 function formatTimestamp(iso: string): string {
   const d = new Date(iso);
@@ -139,6 +153,9 @@ export default function Dashboard() {
   const [hoveredId, setHoveredId] = useState<number | null>(null);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [scanModalOpen, setScanModalOpen] = useState(false);
+  const [scanSteps, setScanSteps] = useState<Record<string, KeywordScanStep>>({});
+  const [scanFatalError, setScanFatalError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [addingKeyword, setAddingKeyword] = useState(false);
@@ -182,17 +199,42 @@ export default function Dashboard() {
     if (scanning) return;
     setScanning(true);
     setScanError(null);
+    setScanFatalError(null);
+    setScanSteps(Object.fromEntries(keywords.map((kw) => [kw.name, { status: "pending" as const }])));
+    setScanModalOpen(true);
+
+    let sawFatalError = false;
+
     try {
-      const res = await api.runScan();
-      setResults(res);
-    } catch (err) {
-      if (err instanceof ApiError && err.body && typeof err.body === "object" && "error" in err.body) {
-        const failure = err.body as ScanFailure;
-        const where = failure.source ? ` (source: ${failure.source}${failure.keyword ? `, keyword: "${failure.keyword}"` : ""})` : "";
-        setScanError(`${failure.detail}${where}`);
-      } else {
-        setScanError(err instanceof ApiError ? err.message : "Scan failed.");
+      await api.streamScan((event) => {
+        if (event.type === "keyword_start" && event.keyword_name) {
+          setScanSteps((steps) => ({ ...steps, [event.keyword_name!]: { status: "scanning" } }));
+        } else if (event.type === "keyword_done" && event.keyword_name) {
+          setScanSteps((steps) => ({
+            ...steps,
+            [event.keyword_name!]: {
+              status: "done",
+              trendScore: event.trend_score,
+              mentionScore: event.mention_score,
+            },
+          }));
+        } else if (event.type === "error") {
+          sawFatalError = true;
+          if (event.keyword) {
+            setScanSteps((steps) => ({ ...steps, [event.keyword!]: { status: "failed" } }));
+          }
+          setScanFatalError(formatScanFailure(event));
+        } else if (event.type === "complete" && event.results) {
+          setResults(event.results);
+        }
+      });
+
+      if (!sawFatalError) {
+        setTimeout(() => setScanModalOpen(false), 1000);
       }
+    } catch (err) {
+      setScanModalOpen(false);
+      setScanError(err instanceof ApiError ? err.message : "Scan failed.");
     } finally {
       setScanning(false);
     }
@@ -241,6 +283,10 @@ export default function Dashboard() {
   const selectedProduct = sel ? { ...sel, verdict: verdict(sel.score), signalDir: signalDir(sel.data) } : null;
   const detailSpark = sel ? makeSparkline(sel.data, 400, 96, HOT, true) : null;
   const historyRunCount = sel ? (results?.history[String(sel.id)]?.length ?? 1) : 0;
+
+  const scanStepEntries = keywords.map((kw) => ({ name: kw.name, step: scanSteps[kw.name] ?? { status: "pending" as const } }));
+  const scanDoneCount = scanStepEntries.filter((e) => e.step.status === "done" || e.step.status === "failed").length;
+  const scanTotalCount = scanStepEntries.length;
 
   const tableWrapStyle: CSSProperties = {
     flex: 1,
@@ -785,6 +831,161 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+
+      {/* SCAN PROGRESS MODAL */}
+      {scanModalOpen && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(11,18,32,0.75)",
+            backdropFilter: "blur(2px)",
+            zIndex: 40,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <div
+            style={{
+              position: "relative",
+              width: `${SCAN_MODAL_W}px`,
+              maxHeight: "78vh",
+              background: "#0E1828",
+              border: "1px solid #1E3A5F",
+              display: "flex",
+              flexDirection: "column",
+            }}
+          >
+            <div style={{ position: "absolute", top: 16, left: 0, width: 14, height: 1, background: "rgba(79,209,197,0.4)" }} />
+            <div style={{ position: "absolute", top: 16, left: 0, width: 1, height: 14, background: "rgba(79,209,197,0.4)" }} />
+            <div style={{ position: "absolute", bottom: 16, left: 0, width: 14, height: 1, background: "rgba(79,209,197,0.4)" }} />
+            <div style={{ position: "absolute", bottom: 16, left: 0, width: 1, height: 14, background: "rgba(79,209,197,0.4)" }} />
+            <div style={{ position: "absolute", top: 16, right: 0, width: 14, height: 1, background: "rgba(79,209,197,0.4)" }} />
+            <div style={{ position: "absolute", top: 16, right: 0, width: 1, height: 14, background: "rgba(79,209,197,0.4)" }} />
+            <div style={{ position: "absolute", bottom: 16, right: 0, width: 14, height: 1, background: "rgba(79,209,197,0.4)" }} />
+            <div style={{ position: "absolute", bottom: 16, right: 0, width: 1, height: 14, background: "rgba(79,209,197,0.4)" }} />
+
+            <div style={{ padding: "28px 28px 16px 28px" }}>
+              <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: "9px", color: "#7E93B0", letterSpacing: "0.2em", marginBottom: 7 }}>
+                {scanFatalError ? "SCAN FAILED" : scanDoneCount >= scanTotalCount && scanTotalCount > 0 ? "SCAN COMPLETE" : "SCAN IN PROGRESS"}
+              </div>
+              <div style={{ fontFamily: "'IBM Plex Sans Condensed',sans-serif", fontSize: "19px", fontWeight: 700, color: "#E6EDF5", letterSpacing: "0.02em" }}>
+                SIGNAL ACQUISITION
+              </div>
+            </div>
+
+            <div style={{ padding: "0 28px", overflowY: "auto", flex: 1 }}>
+              {scanStepEntries.map(({ name, step }) => {
+                const statusColor =
+                  step.status === "done" ? "#4FD1C5" : step.status === "failed" ? "#FF5A5A" : step.status === "scanning" ? "#FF8A3D" : "#7E93B0";
+                const statusLabel =
+                  step.status === "done"
+                    ? "DONE"
+                    : step.status === "failed"
+                      ? "FAILED"
+                      : step.status === "scanning"
+                        ? "SCANNING…"
+                        : "PENDING";
+                return (
+                  <div
+                    key={name}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      padding: "10px 0",
+                      borderBottom: "1px solid rgba(30,58,95,0.5)",
+                      gap: "12px",
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontFamily: "'IBM Plex Sans Condensed',sans-serif",
+                        fontSize: "14px",
+                        color: "#E6EDF5",
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {name}
+                    </span>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: "10px", flexShrink: 0 }}>
+                      {step.status === "done" && (
+                        <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: "10px", color: "rgba(126,147,176,0.6)" }}>
+                          T:{step.trendScore?.toFixed(1)} M:{step.mentionScore}
+                        </span>
+                      )}
+                      <span
+                        style={{
+                          fontFamily: "'JetBrains Mono',monospace",
+                          fontSize: "10px",
+                          color: statusColor,
+                          letterSpacing: "0.08em",
+                          animation: step.status === "scanning" ? "scanFlicker 2s ease-in-out infinite" : "none",
+                        }}
+                      >
+                        {statusLabel}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {scanFatalError ? (
+              <div style={{ padding: "16px 28px 24px 28px" }}>
+                <div
+                  style={{
+                    fontFamily: "'JetBrains Mono',monospace",
+                    fontSize: "11px",
+                    color: "#FF8A8A",
+                    letterSpacing: "0.03em",
+                    marginBottom: 14,
+                  }}
+                >
+                  {scanFatalError}
+                </div>
+                <button
+                  onClick={() => setScanModalOpen(false)}
+                  style={{
+                    background: "none",
+                    border: "1px solid #1E3A5F",
+                    color: "#7E93B0",
+                    fontFamily: "'JetBrains Mono',monospace",
+                    fontSize: "10px",
+                    padding: "6px 16px",
+                    cursor: "pointer",
+                    letterSpacing: "0.07em",
+                  }}
+                >
+                  ✕ CLOSE
+                </button>
+              </div>
+            ) : (
+              <div style={{ padding: "16px 28px 24px 28px" }}>
+                <div style={{ height: "2px", background: "#1E3A5F", position: "relative", overflow: "hidden", marginBottom: 8 }}>
+                  <div
+                    style={{
+                      position: "absolute",
+                      left: 0,
+                      top: 0,
+                      bottom: 0,
+                      background: "#FF8A3D",
+                      width: scanTotalCount > 0 ? `${(scanDoneCount / scanTotalCount) * 100}%` : "0%",
+                      transition: "width 0.3s ease",
+                    }}
+                  />
+                </div>
+                <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: "10px", color: "rgba(126,147,176,0.6)", letterSpacing: "0.07em" }}>
+                  {scanDoneCount} / {scanTotalCount} KEYWORDS
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

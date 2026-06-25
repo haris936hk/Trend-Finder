@@ -3,38 +3,23 @@ the keywords and subreddits tables with starting data. Not auto-run on app start
 
 from app.database import Base, engine, SessionLocal
 from app.models import Keyword, Subreddit
-
-KEYWORDS = [
-    "Monitor Stand Riser",
-    "Cable Management Kit",
-    "Ergonomic Wrist Rest",
-    "Desk Lamp with Wireless Charging",
-    "Adjustable Laptop Stand",
-    "Desk Pad",
-    "USB Hub and Adapter",
-    "Wireless Charging Pad",
-    "Standing Desk Converter",
-    "Mini Desk Vacuum",
-    "Desk Organizer",
-    "Ergonomic Keyboard",
-    "Ergonomic Mouse",
-    "Monitor Light Bar",
-    "Mechanical Keyboard for Desk Setup",
-]
-
-SUBREDDITS = ["battlestations", "WFH", "desksetup"]
+from app.seed_data import DEFAULT_KEYWORDS, DEFAULT_SUBREDDITS
 
 
 def seed():
+    """Force-reseed the keyword/subreddit defaults regardless of current table
+    contents. The app itself auto-seeds these defaults on first startup when
+    the tables are empty (see app/main.py); run this script manually only if
+    you want to add the defaults back on top of/after clearing your own data."""
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
-        for name in KEYWORDS:
+        for name in DEFAULT_KEYWORDS:
             db.add(Keyword(name=name, synonyms=""))
-        for name in SUBREDDITS:
+        for name in DEFAULT_SUBREDDITS:
             db.add(Subreddit(name=name))
         db.commit()
-        print(f"Seeded {len(KEYWORDS)} keywords and {len(SUBREDDITS)} subreddits.")
+        print(f"Seeded {len(DEFAULT_KEYWORDS)} keywords and {len(DEFAULT_SUBREDDITS)} subreddits.")
     finally:
         db.close()
 

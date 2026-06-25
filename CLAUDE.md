@@ -30,8 +30,10 @@ uvicorn app.main:app --reload
 ```
 
 - Health check: `curl http://127.0.0.1:8000/health` -> `{"status":"ok"}`
-- `backend/trend_finder.db` (SQLite) is created automatically on startup — tables only, no data.
-- Seed starting keywords/subreddits manually (not run automatically): `python seed.py`
+- `backend/trend_finder.db` (SQLite) is created automatically on startup. If the
+  `keywords`/`subreddits` tables are empty, they're auto-seeded with defaults
+  from `app/seed_data.py` (only when empty — never overwrites existing rows).
+- Force-reseed the defaults manually: `python seed.py`
 - No test suite exists yet.
 
 ### Frontend (run from `frontend/`)
@@ -46,8 +48,10 @@ npm run preview
 ### Reddit credentials
 
 Copy `backend/.env.example` to `backend/.env` and fill in `REDDIT_CLIENT_ID`,
-`REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT`. The app boots fine without them;
-`get_reddit_mentions()` raises a `RuntimeError` at call time if they're missing.
+`REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT`. Reddit is optional: the app boots
+fine without them, and `POST /scan` falls back to Google Trends-only scoring
+(see `reddit_available()` in `reddit_scraper.py`) if credentials are missing
+or a Reddit call fails mid-scan, rather than aborting the run.
 
 ## Architecture
 

@@ -3,13 +3,15 @@ and wires up the keyword/subreddit/scan routers."""
 
 import logging
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
-from app.database import Base, engine
-from app.routers import keywords, subreddits, scan
-from app.routers.scan import ScanFailedError
+from sqlalchemy.orm import Session
+
+from app.database import Base, engine, SessionLocal
+from app.models import Keyword, Subreddit, Settings
+from app.routers import keywords, subreddits, scan, settings
+from app.seed_data import DEFAULT_KEYWORDS, DEFAULT_SUBREDDITS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -23,21 +25,29 @@ app.add_middleware(
 )
 
 
+def _seed_defaults_if_empty(db: Session) -> None:
+    """Populate the keywords/subreddits tables with default starting data the
+    first time the app boots against a fresh (empty) database. Leaves existing
+    data untouched on every later startup."""
+    if db.query(Keyword).first() is None:
+        for name in DEFAULT_KEYWORDS:
+            db.add(Keyword(name=name, synonyms=""))
+    if db.query(Subreddit).first() is None:
+        for name in DEFAULT_SUBREDDITS:
+            db.add(Subreddit(name=name))
+    if db.query(Settings).first() is None:
+        db.add(Settings(id=1, lookback_months=12))
+    db.commit()
+
+
 @app.on_event("startup")
 def on_startup():
-    # Schema-only: create tables if they don't exist. No seeding happens here —
-    # run `python seed.py` manually to populate initial keywords/subreddits.
     Base.metadata.create_all(bind=engine)
-
-
-@app.exception_handler(ScanFailedError)
-async def scan_failed_handler(request: Request, exc: ScanFailedError):
-    body = {"error": "scan_failed", "detail": exc.detail}
-    if exc.keyword is not None:
-        body["keyword"] = exc.keyword
-    if exc.source is not None:
-        body["source"] = exc.source
-    return JSONResponse(status_code=500, content=body)
+    db = SessionLocal()
+    try:
+        _seed_defaults_if_empty(db)
+    finally:
+        db.close()
 
 
 @app.get("/health")
@@ -48,3 +58,4 @@ def health_check():
 app.include_router(keywords.router)
 app.include_router(subreddits.router)
 app.include_router(scan.router)
+app.include_router(settings.router)

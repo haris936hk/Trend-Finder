@@ -22,13 +22,21 @@ export default function Settings() {
   const [editingSubredditId, setEditingSubredditId] = useState<number | null>(null);
   const [editSubredditName, setEditSubredditName] = useState("");
 
+  const [lookbackMonths, setLookbackMonths] = useState("12");
+  const [savingLookback, setSavingLookback] = useState(false);
+
   async function loadAll() {
     setLoading(true);
     setError(null);
     try {
-      const [kws, subs] = await Promise.all([api.listKeywords(), api.listSubreddits()]);
+      const [kws, subs, settings] = await Promise.all([
+        api.listKeywords(),
+        api.listSubreddits(),
+        api.getSettings(),
+      ]);
       setKeywords(kws);
       setSubreddits(subs);
+      setLookbackMonths(String(settings.lookback_months));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to load settings.");
     } finally {
@@ -45,6 +53,25 @@ export default function Settings() {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
+  }
+
+  async function handleSaveLookback(e: FormEvent) {
+    e.preventDefault();
+    const months = Number(lookbackMonths);
+    if (!Number.isInteger(months) || months < 1 || months > 24) {
+      setError("Lookback window must be a whole number of months between 1 and 24.");
+      return;
+    }
+    setError(null);
+    setSavingLookback(true);
+    try {
+      const updated = await api.updateSettings(months);
+      setLookbackMonths(String(updated.lookback_months));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to update scan window.");
+    } finally {
+      setSavingLookback(false);
+    }
   }
 
   async function handleAddKeyword(e: FormEvent) {
@@ -145,6 +172,33 @@ export default function Settings() {
       )}
 
       <section className="mt-6">
+        <h2 className="text-xl font-semibold text-slate-700">Scan Window</h2>
+        <p className="mt-1 text-xs text-slate-500">
+          How many months back to look when scoring Google Trends and Reddit mentions.
+        </p>
+
+        <form onSubmit={handleSaveLookback} className="mt-3 flex items-center gap-2">
+          <input
+            type="number"
+            min={1}
+            max={24}
+            className="w-24 rounded border border-slate-300 px-2 py-1 text-sm"
+            value={lookbackMonths}
+            onChange={(e) => setLookbackMonths(e.target.value)}
+            disabled={loading}
+          />
+          <span className="text-sm text-slate-600">months</span>
+          <button
+            type="submit"
+            disabled={loading || savingLookback}
+            className="rounded bg-slate-700 px-3 py-1 text-sm text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {savingLookback ? "Saving…" : "Save"}
+          </button>
+        </form>
+      </section>
+
+      <section className="mt-8">
         <h2 className="text-xl font-semibold text-slate-700">Keywords</h2>
 
         {loading ? (

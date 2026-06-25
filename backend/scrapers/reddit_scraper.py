@@ -2,8 +2,8 @@
 
 get_mention_score() searches a list of subreddits for posts and top-level
 comments that contain an exact-phrase (case-insensitive) match against a
-keyword or any of its synonyms, within the last 90 days, and returns the
-count of distinct matching posts/comments.
+keyword or any of its synonyms, within a configurable lookback window, and
+returns the count of distinct matching posts/comments.
 """
 
 import logging
@@ -18,7 +18,6 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-MENTION_WINDOW_DAYS = 90
 MAX_COMMENTS_PER_THREAD = 50
 
 
@@ -74,16 +73,44 @@ def _get_reddit_client() -> praw.Reddit:
     return praw.Reddit(client_id=client_id, client_secret=client_secret, user_agent=user_agent)
 
 
-def get_mention_score(keyword_name: str, synonyms: list[str], subreddit_names: list[str]) -> int:
+def reddit_available() -> bool:
+    """Returns True if Reddit credentials are configured in the environment.
+    Used by the scan pipeline to decide upfront whether to attempt Reddit
+    scraping at all, or fall back to Google Trends-only scoring."""
+    try:
+        _load_reddit_credentials()
+        return True
+    except RedditCredentialsError:
+        return False
+
+
+def _time_filter_for(lookback_months: int) -> str:
+    """Picks the smallest PRAW `time_filter` enum value that still covers the
+    requested lookback window (PRAW only accepts a fixed set of values, not
+    an arbitrary day count)."""
+    if lookback_months <= 1:
+        return "month"
+    if lookback_months <= 12:
+        return "year"
+    return "all"
+
+
+def get_mention_score(
+    keyword_name: str,
+    synonyms: list[str],
+    subreddit_names: list[str],
+    lookback_months: int = 3,
+) -> int:
     """Returns the count of distinct posts/comments matching `keyword_name` or any
-    of `synonyms`, across `subreddit_names`, within the last 90 days.
+    of `synonyms`, across `subreddit_names`, within the last `lookback_months` months.
     """
     reddit = _get_reddit_client()
 
     terms = [keyword_name.strip().lower()] + [s.strip().lower() for s in synonyms]
     terms = [t for t in terms if t]
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=MENTION_WINDOW_DAYS)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_months * 30)
+    time_filter = _time_filter_for(lookback_months)
     matched_ids: set[str] = set()
 
     for subreddit_name in subreddit_names:
@@ -92,7 +119,7 @@ def get_mention_score(keyword_name: str, synonyms: list[str], subreddit_names: l
             seen_post_ids: set[str] = set()
 
             for term in terms:
-                for submission in subreddit.search(term, sort="new", time_filter="year"):
+                for submission in subreddit.search(term, sort="new", time_filter=time_filter):
                     if submission.id in seen_post_ids:
                         continue
 

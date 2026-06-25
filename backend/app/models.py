@@ -21,6 +21,13 @@ class Subreddit(Base):
     name = Column(String, nullable=False)  # max 5 rows enforced at the API layer
 
 
+class Settings(Base):
+    __tablename__ = "settings"
+
+    id = Column(Integer, primary_key=True, default=1)  # singleton row
+    lookback_months = Column(Integer, nullable=False, default=12)
+
+
 class Run(Base):
     __tablename__ = "runs"
 

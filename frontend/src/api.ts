@@ -2,7 +2,7 @@
 // The backend is a single local process on :8000 with CORS open for :5173 —
 // no auth, no env config needed for a local single-user tool.
 
-import type { Keyword, Subreddit, ResultsResponse } from "./types";
+import type { Keyword, Subreddit, Settings, ResultsResponse, ScanProgressEvent } from "./types";
 
 const API_BASE = "http://127.0.0.1:8000";
 
@@ -51,6 +51,37 @@ export const api = {
   deleteSubreddit: (id: number) =>
     request<{ status: string; id: number }>(`/subreddits/${id}`, { method: "DELETE" }),
 
-  runScan: () => request<ResultsResponse>("/scan", { method: "POST" }),
+  streamScan: async (onEvent: (event: ScanProgressEvent) => void): Promise<void> => {
+    const res = await fetch(`${API_BASE}/scan`, { method: "POST" });
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      const message = typeof body?.detail === "string" ? body.detail : res.statusText;
+      throw new ApiError(res.status, body, message);
+    }
+    if (!res.body) return;
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const records = buffer.split("\n\n");
+      buffer = records.pop() ?? "";
+      for (const record of records) {
+        const dataLine = record.split("\n").find((line) => line.startsWith("data: "));
+        if (!dataLine) continue;
+        onEvent(JSON.parse(dataLine.slice("data: ".length)) as ScanProgressEvent);
+      }
+    }
+  },
   getResults: () => request<ResultsResponse>("/results"),
+
+  getSettings: () => request<Settings>("/settings"),
+  updateSettings: (lookback_months: number) =>
+    request<Settings>("/settings", { method: "PUT", body: JSON.stringify({ lookback_months }) }),
 };

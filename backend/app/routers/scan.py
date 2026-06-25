@@ -1,24 +1,27 @@
 """Scan orchestration: runs the trend + Reddit scrapers for every keyword,
 normalizes and combines the raw scores into a composite score, and persists
-a Run + Score rows. GET /results serializes the latest run plus full
-per-keyword history."""
+a Run + Score rows. POST /scan streams per-keyword progress as
+Server-Sent Events while the scan runs. GET /results serializes the latest
+run plus full per-keyword history."""
 
+import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Iterator
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Keyword, Subreddit, Run, Score
+from app.models import Keyword, Subreddit, Run, Score, Settings
 from app.schemas import ResultsResponse, LatestRun, RankedScore, HistoryEntry
 from scrapers.trends_scraper import get_trend_score, TrendsScraperError
 from scrapers.reddit_scraper import (
     get_mention_score,
+    reddit_available,
     RedditScraperError,
-    RedditCredentialsError,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,16 +32,8 @@ TREND_WEIGHT = 0.6
 MENTION_WEIGHT = 0.4
 
 
-class ScanFailedError(Exception):
-    """Raised whenever a scan must abort before completing — carries enough
-    detail to build the {"error": "scan_failed", ...} response body without
-    FastAPI wrapping it inside a "detail" key."""
-
-    def __init__(self, detail: str, keyword: Optional[str] = None, source: Optional[str] = None):
-        self.detail = detail
-        self.keyword = keyword
-        self.source = source
-        super().__init__(detail)
+def _sse(event_type: str, **fields) -> str:
+    return f"data: {json.dumps({'type': event_type, **fields})}\n\n"
 
 
 def _normalize(values: list[float]) -> list[float]:
@@ -89,41 +84,68 @@ def _build_results_response(db: Session) -> ResultsResponse:
     return ResultsResponse(latest_run=latest_run_out, history=history)
 
 
-@router.post("/scan", response_model=ResultsResponse)
-def run_scan(db: Session = Depends(get_db)):
-    keywords = db.query(Keyword).all()
-    subreddits = db.query(Subreddit).all()
-
-    if not keywords or not subreddits:
-        raise HTTPException(
-            status_code=400,
-            detail="Add at least one keyword and one subreddit before running a scan.",
-        )
-
+def _run_scan_events(
+    db: Session, keywords: list[Keyword], subreddits: list[Subreddit], lookback_months: int
+) -> Iterator[str]:
+    """Generator driving the scan loop, yielding SSE-formatted progress
+    strings as each keyword completes and persisting the Run + Score rows
+    once every keyword has been scored."""
     subreddit_names = [s.name for s in subreddits]
+    total = len(keywords)
 
-    logger.info("Scan started: %d keywords, %d subreddits", len(keywords), len(subreddits))
+    logger.info("Scan started: %d keywords, %d subreddits", total, len(subreddits))
+
+    reddit_enabled = reddit_available()
+    if not reddit_enabled:
+        logger.warning(
+            "Reddit credentials not configured; scoring with Google Trends only."
+        )
 
     raw_results: list[tuple[Keyword, float, int]] = []
     for i, keyword in enumerate(keywords):
+        yield _sse("keyword_start", keyword_name=keyword.name, index=i, total=total)
+
         synonyms = [s.strip() for s in (keyword.synonyms or "").split(",") if s.strip()]
 
         if i > 0:
-            time.sleep(1)  # avoid soft-blocking pytrends with rapid sequential calls
+            time.sleep(5)  # avoid soft-blocking pytrends with rapid sequential calls
 
         try:
-            trend_score = get_trend_score(keyword.name)
+            trend_score = get_trend_score(keyword.name, lookback_months)
         except TrendsScraperError as exc:
             logger.error("Scan aborted: %s", exc, exc_info=True)
-            raise ScanFailedError(detail=str(exc), keyword=keyword.name, source="trends")
+            yield _sse("error", detail=str(exc), keyword=keyword.name, source="trends")
+            return
 
-        try:
-            mention_score = get_mention_score(keyword.name, synonyms, subreddit_names)
-        except (RedditScraperError, RedditCredentialsError) as exc:
-            logger.error("Scan aborted: %s", exc, exc_info=True)
-            raise ScanFailedError(detail=str(exc), keyword=keyword.name, source="reddit")
+        mention_score = 0
+        if reddit_enabled:
+            try:
+                mention_score = get_mention_score(
+                    keyword.name, synonyms, subreddit_names, lookback_months
+                )
+            except RedditScraperError as exc:
+                logger.warning(
+                    "Reddit unavailable mid-scan (%s); falling back to Google Trends only "
+                    "for the rest of this run.",
+                    exc,
+                )
+                reddit_enabled = False
 
         raw_results.append((keyword, trend_score, mention_score))
+        yield _sse(
+            "keyword_done",
+            keyword_name=keyword.name,
+            index=i,
+            total=total,
+            trend_score=trend_score,
+            mention_score=mention_score,
+        )
+
+    # If Reddit was never available (or dropped out mid-scan), score this run
+    # on trend signal alone instead of diluting it with all-zero mention data.
+    trend_weight, mention_weight = (
+        (TREND_WEIGHT, MENTION_WEIGHT) if reddit_enabled else (1.0, 0.0)
+    )
 
     trend_values = [r[1] for r in raw_results]
     mention_values = [float(r[2]) for r in raw_results]
@@ -138,7 +160,7 @@ def run_scan(db: Session = Depends(get_db)):
         for (keyword, trend_score, mention_score), norm_trend, norm_mention in zip(
             raw_results, normalized_trends, normalized_mentions
         ):
-            composite = TREND_WEIGHT * norm_trend + MENTION_WEIGHT * norm_mention
+            composite = trend_weight * norm_trend + mention_weight * norm_mention
             db.add(
                 Score(
                     run_id=run.id,
@@ -152,11 +174,33 @@ def run_scan(db: Session = Depends(get_db)):
     except Exception as exc:
         db.rollback()
         logger.error("Scan aborted: DB write failed: %s", exc, exc_info=True)
-        raise ScanFailedError(detail=str(exc), source="db")
+        yield _sse("error", detail=str(exc), source="db")
+        return
 
     logger.info("Scan completed: run_id=%d", run.id)
 
-    return _build_results_response(db)
+    results = _build_results_response(db)
+    yield _sse("complete", results=results.model_dump())
+
+
+@router.post("/scan")
+def run_scan(db: Session = Depends(get_db)):
+    keywords = db.query(Keyword).all()
+    subreddits = db.query(Subreddit).all()
+    settings = db.query(Settings).first()
+
+    if not keywords or not subreddits:
+        raise HTTPException(
+            status_code=400,
+            detail="Add at least one keyword and one subreddit before running a scan.",
+        )
+
+    lookback_months = settings.lookback_months if settings is not None else 12
+
+    return StreamingResponse(
+        _run_scan_events(db, keywords, subreddits, lookback_months),
+        media_type="text/event-stream",
+    )
 
 
 @router.get("/results", response_model=ResultsResponse)
